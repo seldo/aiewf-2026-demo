@@ -1,0 +1,11 @@
+v1
+
+# secrets / env
+.env
+.env.*
+
+# OS junk
+.DS_Store
+
+# local Claude config
+.claude/
