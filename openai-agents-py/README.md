@@ -71,6 +71,12 @@ Open <http://localhost:3000>.
 | Turbopack: "couldn't find the Next.js package (`next/package.json`)" | `node_modules` is missing — run `npm install`. |
 | Product images 404 / broken | `public/product-images` is a symlink to the repo-root `product-images/`. Confirm it resolves: `ls public/product-images/toy-001.png`. |
 
+## Adding Arize observability
+
+This variant ships with **no** tracing. To add it, just tell your coding agent
+to **instrument this app with Arize AX** — it will add the OpenInference
+instrumentation for the OpenAI Agents SDK and wire up the tracer.
+
 ## Key Files
 
 | File | Purpose |
