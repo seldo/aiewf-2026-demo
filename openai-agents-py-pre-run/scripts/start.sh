@@ -138,6 +138,14 @@ for i in $(seq 1 15); do
   sleep 1
 done
 
+# --- Install Node dependencies ---
+
+if [ ! -d "$APP_DIR/node_modules" ]; then
+  echo "Installing Node dependencies..."
+  cd "$APP_DIR"
+  npm install
+fi
+
 # --- Start Next.js ---
 
 echo ""
