@@ -4,6 +4,8 @@ from contextlib import nullcontext
 
 from agents import Agent, Runner, SQLiteSession, flush_traces
 from openai.types.responses import ResponseTextDeltaEvent
+from opentelemetry import trace
+from openinference.semconv.trace import SpanAttributes, OpenInferenceSpanKindValues
 
 from backend.tools import (
     search_products,
@@ -22,6 +24,12 @@ try:
 except ImportError:
     def using_session(session_id: str):  # type: ignore[no-redef]
         return nullcontext()
+
+# The OpenInference openai-agents instrumentor sets input/output on the LLM
+# span but not on the workflow root, so the trace's top-level span shows up
+# empty in Arize AX. Wrap each request in our own span and set the
+# OpenInference input/output attributes on it manually.
+_tracer = trace.get_tracer(__name__)
 
 SYSTEM_PROMPT = """You are a friendly and helpful shopping assistant for "Wonder Toys", a children's toy store. Your job is to help customers find the perfect toys, answer questions about products, and help them complete purchases.
 
@@ -150,28 +158,45 @@ async def stream_agent(messages: list[dict], user_id: str) -> AsyncIterator[str]
 
     # Set the current user ID in the context var so tools can access it
     token = current_user_id.set(user_id)
+    # Accumulate the assistant's text so we can record it as the root span's
+    # output.value once streaming completes.
+    output_chunks: list[str] = []
     try:
-        with using_session(user_id):
-            result = Runner.run_streamed(agent, last_message, session=session)
-            async for event in result.stream_events():
-                # Tool calls arrive as RunItemStreamEvent with item.type == "tool_call_item"
-                if event.type == "run_item_stream_event":
-                    if event.item.type == "tool_call_item":
-                        in_tool_call = True
-                    continue
+        with _tracer.start_as_current_span("agent_request") as span:
+            span.set_attribute(
+                SpanAttributes.OPENINFERENCE_SPAN_KIND,
+                OpenInferenceSpanKindValues.AGENT.value,
+            )
+            span.set_attribute(SpanAttributes.INPUT_VALUE, last_message)
+            span.set_attribute(SpanAttributes.INPUT_MIME_TYPE, "text/plain")
+            span.set_attribute(SpanAttributes.SESSION_ID, user_id)
+            try:
+                with using_session(user_id):
+                    result = Runner.run_streamed(agent, last_message, session=session)
+                    async for event in result.stream_events():
+                        # Tool calls arrive as RunItemStreamEvent with item.type == "tool_call_item"
+                        if event.type == "run_item_stream_event":
+                            if event.item.type == "tool_call_item":
+                                in_tool_call = True
+                            continue
 
-                # Text deltas arrive as RawResponsesStreamEvent with ResponseTextDeltaEvent data
-                if event.type == "raw_response_event" and isinstance(
-                    event.data, ResponseTextDeltaEvent
-                ):
-                    text_delta = event.data.delta
-                    if not text_delta:
-                        continue
-                    if in_tool_call and had_text_before:
-                        yield f"data: {json.dumps({'text': chr(10) + chr(10)})}\n\n"
-                    in_tool_call = False
-                    had_text_before = True
-                    yield f"data: {json.dumps({'text': text_delta})}\n\n"
+                        # Text deltas arrive as RawResponsesStreamEvent with ResponseTextDeltaEvent data
+                        if event.type == "raw_response_event" and isinstance(
+                            event.data, ResponseTextDeltaEvent
+                        ):
+                            text_delta = event.data.delta
+                            if not text_delta:
+                                continue
+                            if in_tool_call and had_text_before:
+                                yield f"data: {json.dumps({'text': chr(10) + chr(10)})}\n\n"
+                            in_tool_call = False
+                            had_text_before = True
+                            output_chunks.append(text_delta)
+                            yield f"data: {json.dumps({'text': text_delta})}\n\n"
+            finally:
+                # Record output even on partial/failed streams.
+                span.set_attribute(SpanAttributes.OUTPUT_VALUE, "".join(output_chunks))
+                span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, "text/plain")
     finally:
         current_user_id.reset(token)
         # Flush the OpenAI Agents SDK trace processors so spans reach the
